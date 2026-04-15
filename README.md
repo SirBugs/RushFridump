@@ -1,198 +1,162 @@
-# RushFridump 🐰⚡
+<h1 align="center">RushFridump</h1>
 
-> Lightning fast Frida memory dumper with intelligent version management and professional interface
+<p align="center">
+  <em>Lightning‑fast Frida memory dumper with automatic <code>frida-server</code> management and built‑in secret hunting.</em>
+</p>
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
-[![Frida](https://img.shields.io/badge/Frida-16.0%2B-green.svg)](https://frida.re)
-[![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Local-lightgrey.svg)]()
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/Frida-16%2B-green" alt="Frida 16+">
+  <img src="https://img.shields.io/badge/Platform-Android%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platforms">
+</p>
 
-## ✨ Features
+```
+  ____            _     _____     _     _
+ |  _ \ _   _ ___| |__ |  ___| __(_) __| |_   _ _ __ ___  _ __         (\_/)
+ | |_) | | | / __| '_ \| |_ | '__| |/ _` | | | | '_ ` _ \| '_ \        (o.o)
+ |  _ <| |_| \__ \ | | |  _|| |  | | (_| | |_| | | | | | | |_) |      (")_(")
+ |_| \_\\__,_|___/_| |_|_|  |_|  |_|\__,_|\__,_|_| |_| |_| .__/
+                                                         |_|
+```
 
-🚀 **Lightning Fast** - Optimized memory dumping with real-time progress bars  
-🔧 **Smart Version Management** - Automatically detects and manages frida-server versions  
-🎯 **Intelligent Process Discovery** - Fuzzy matching with helpful suggestions  
-🎨 **Professional Interface** - Beautiful colored output with clear status indicators  
-🤖 **Android Focused** - Specialized for Android devices with automatic frida-server management  
-🐰 **User Friendly** - Clean error messages and troubleshooting guidance  
+---
 
-## 🚀 Quick Start
+## Why RushFridump?
 
-### Prerequisites
+A drop‑in replacement for [`fridump`](https://github.com/Nightbringer21/fridump) focused on the parts that actually slow down a memory‑dump workflow:
 
-Before running RushFridump, ensure you have:
+- **Auto‑manages `frida-server`** on rooted Android devices — picks the binary that matches your client version, kills the stale one, starts the right one.
+- **Chunked reads** so huge regions don't blow up the Frida RPC.
+- **Single‑file output** (`memory.bin`) plus a machine‑readable **`index.tsv`** mapping every byte range back to its original base address.
+- **Built‑in search** (`--search`) — scan the dump for one or many strings, case‑insensitive, both **ASCII and UTF‑16LE**, with each hit expanded to the full surrounding printable string and tagged with the source memory range.
+- Graceful cleanup: `script.unload()` / `session.detach()` on exit and on Ctrl+C.
+
+## Installation
 
 ```bash
-# 1. Python 3.10+ installed
-python3 --version
-
-# 2. Frida tools installed  
+git clone https://github.com/<you>/RushFridump.git
+cd RushFridump
 pip install frida frida-tools
-
-# 3. Android SDK Platform Tools (required for Android devices)
-# macOS: brew install android-platform-tools
-# Ubuntu: sudo apt install android-tools-adb
+python3 rushfridump.py --help
 ```
 
-### For Android Devices
-- **Device rooted** with su access
-- **USB debugging enabled** in Developer Options
-- **frida-server installed** on device (RushFridump manages versions automatically)
+Runtime dependencies:
+- **Python 3.10+**
+- **Frida** (`frida` + `frida-tools`) — only needed when dumping; `--search` works without it
+- **adb** on PATH (Android only)
+- A rooted Android device with a `frida-server-<version>` binary dropped into `/data/local/tmp/` (the tool handles `chmod` and launch)
 
-## 📦 Installation
+## Quick start
 
 ```bash
-git clone https://github.com/yourusername/rushfridump.git
-cd rushfridump
-python3 rushfridump.py -h
+# Dump a running app over USB
+python3 rushfridump.py -U com.whatsapp
+
+# Dump a local process
+python3 rushfridump.py Calculator
+
+# Dump read-only regions too, extract strings afterwards
+python3 rushfridump.py -U -r -s com.whatsapp
+
+# Search a previous dump for credentials (ASCII + UTF-16LE, case-insensitive)
+python3 rushfridump.py --search ./com_whatsapp -i -t password -t "Bearer " -t api_key
 ```
 
-## 💻 Usage
+Don't know the process name? `frida-ps -Ua` lists running apps with identifiers.
 
-### Basic Commands
+## Output layout
+
+```
+./com_whatsapp/
+├── memory.bin     # raw bytes, every dumped range concatenated
+├── index.tsv      # offset_in_dump \t base_address \t size   (one row per range)
+└── strings.txt    # printable ASCII strings (only with -s)
+```
+
+`index.tsv` is what lets `--search` tell you *which* memory range a hit came from, not just a file offset.
+
+## Searching a dump
 
 ```bash
-# Android app with string extraction
-python3 rushfridump.py -U -s "Gmail"
-
-# Android app with verbose output
-python3 rushfridump.py -U -v "WhatsApp" 
-
-# Local Windows/macOS process
-python3 rushfridump.py -o /tmp/dumps "Calculator"
-
-# Custom output directory  
-python3 rushfridump.py -U -o ./custom_dumps "Instagram"
+python3 rushfridump.py --search ./com_whatsapp -t password -t api_key -i
 ```
 
-### Command Options
+Each match prints the **full surrounding printable string** (not a fixed byte window):
 
 ```
-Usage: python3 rushfridump.py [options] <process_name>
-
-Required:
-  process_name          Target process name (exact or partial match)
-
-Options:
-  -U, --usb            Connect to USB device (Android)
-  -s, --strings        Extract strings from memory dump
-  -v, --verbose        Enable verbose output with debugging info
-  -r, --read-only      Include read-only memory regions  
-  -o, --out DIR        Custom output directory (default: ./<process_name>)
-  --max-size BYTES     Maximum dump file size (default: 20MB)
-  -h, --help           Show help message
+[ascii]   'password' @ 0x7f3a2c000+0x2814  |  user_password=hunter2&remember=1
+[utf16le] 'password' @ 0x7f3a2c000+0x4120  |  Save password for this site?
+[ascii]   'api_key'  @ 0x7f3a2e000+0x0918  |  api_key=sk_live_abc123xyz
 ```
 
-## 🎯 Smart Features
+Useful flags:
 
-### Automatic Version Management
-RushFridump automatically detects version conflicts and manages frida-server:
+| Flag | Purpose |
+|------|---------|
+| `-t, --term TEXT` | Search term (repeat `-t` for multiple terms) |
+| `-i, --ignore-case` | Case‑insensitive (ASCII matching) |
+| `--max-string N` | Cap expansion at N bytes per side when showing the full string (default **512**) |
+| `--raw-context` | Old behaviour: fixed byte window, non‑printables as `.` |
+| `-C, --context N` | Window size for `--raw-context` (default 16) |
+
+Overlapping matches within the same expanded string are automatically deduped.
+
+## All options
+
+```
+positional:
+  process                  target process name (omit when using --search)
+
+dumping:
+  -U, --usb                connect over USB (Android)
+  -D, --device SERIAL      pick a specific adb device when several are attached
+  -r, --read-only          shortcut for --permissions r--
+  --permissions PROT       Frida permission filter (e.g. rw-, r--, r-x)
+  --max-range-size BYTES   skip ranges larger than this (default: 20 MiB)
+  --chunk-size BYTES       read each range in chunks of this size (default: 1 MiB)
+  --no-auto-server         skip automatic frida-server version management
+  -o, --out DIR            output directory (default: ./<process_name>)
+  -s, --strings            extract printable strings into strings.txt after dumping
+  -v, --verbose            verbose progress / error output
+
+searching:
+  --search DIR             search DIR/memory.bin for terms and exit
+  -t, --term TEXT          search term (repeatable)
+  -i, --ignore-case        case-insensitive ASCII match
+  --max-string N           cap on bytes expanded around each hit (default: 512)
+  --raw-context            fixed byte window instead of full-string expansion
+  -C, --context N          window size when --raw-context is set (default: 16)
+```
+
+## Automatic `frida-server` management
+
+On USB mode, RushFridump inspects `/data/local/tmp/frida-server*`, reports what's available, and picks the one whose version matches your Frida client:
 
 ```
 Frida Version Status:
   Client: 17.2.12
   Available servers:
     ✗ /data/local/tmp/frida-server-16.1.11 (16.1.11)
-    ✓ /data/local/tmp/frida-server-17.2.12 (17.2.12)  ← Auto-selected
-    ✗ /data/local/tmp/frida-server-mac (16.1.11)
-    ✗ /data/local/tmp/frida-server-ubuntu (16.3.3)
+    ✓ /data/local/tmp/frida-server-17.2.12 (17.2.12)  ← auto‑selected
 ```
 
-### Real-time Progress Tracking
-```
-[→] Processing 1203 memory ranges...
-[██████████████████████████████] 100% Dumping range 1203/1203
-[✓] Memory dump completed
-```
+It then `chmod 755`s the matching binary, kills any running `frida-server`, and starts the correct one via `setsid` so the adb channel detaches cleanly. Pass `--no-auto-server` to skip this entirely.
 
-### Organized Output
-```
-./Gmail/
-├── memory.txt      # All memory ranges in single file
-└── strings.txt     # Extracted strings (with -s flag)
-```
+## Troubleshooting
 
-## 🛠️ Device Setup Guide
+| Symptom | Fix |
+|---------|-----|
+| `Process '…' not found` | Verify the name with `frida-ps -Ua` (pass the *identifier*, e.g. `com.whatsapp`) |
+| `No USB devices found` | `adb devices` — enable USB debugging / trust the host |
+| `No matching server found for client version …` | Download the matching `frida-server-<version>-android-<arch>` from the Frida release page and push it to `/data/local/tmp/` |
+| `Failed to start frida-server` | Verify root: `adb shell su -c id`. Also check SELinux isn't blocking the binary (`setenforce 0` on permissive test devices) |
+| Huge pages skipped | Raise `--max-range-size`; regions > default 20 MiB are skipped by design |
+| RPC timeouts on large regions | Lower `--chunk-size` (e.g. `--chunk-size 262144`) |
 
-### Android Setup
-```bash
-# 1. Enable USB debugging and connect device
-adb devices
+## Credits
 
-# 2. Check if device is rooted  
-adb shell su -c "id"
+Originally inspired by [`fridump`](https://github.com/Nightbringer21/fridump). Rewritten with automatic version handling, chunked reads, a proper search mode, and a cleaner output layout.
 
-# 3. RushFridump will handle frida-server automatically
-python3 rushfridump.py -U "com.android.chrome"
-```
+## License
 
-### Local Process Setup
-```bash
-# 1. Ensure Frida is installed locally
-frida-ps
-
-# 2. Run RushFridump on local process
-python3 rushfridump.py "Calculator"
-```
-
-## 🐛 Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| **"Process not found"** | Use `frida-ps -U` to find exact process name |
-| **"No USB devices"** | Check `adb devices` and enable USB debugging |
-| **"Version mismatch"** | RushFridump auto-fixes this - ensure device is rooted |
-| **"Permission denied"** | Verify root access: `adb shell su -c "id"` |
-| **"Connection failed"** | Restart frida-server: `adb shell su -c "killall frida-server"` |
-
-### Getting Process Names
-```bash
-# List all processes on device
-frida-ps -U
-
-# List processes matching pattern  
-frida-ps -U | grep -i gmail
-
-# Use partial names with RushFridump (it suggests matches)
-python3 rushfridump.py -U -v "gmai"
-```
-
-## 🆚 Why RushFridump?
-
-| Feature | Original Fridump | RushFridump |
-|---------|------------------|-------------|
-| Version Management | ❌ Manual | ✅ **Automatic** |
-| Progress Tracking | ❌ Text only | ✅ **Visual progress bars** |
-| Error Messages | ❌ Generic | ✅ **Detailed with solutions** |
-| Process Discovery | ❌ Exact match only | ✅ **Fuzzy matching + suggestions** |
-| Interface | ❌ Plain text | ✅ **Professional colored output** |
-| Output Organization | ❌ Multiple files | ✅ **Single organized file** |
-
-## 🏗️ Requirements
-
-- **Python 3.10+** (tested with 3.10, 3.11, 3.13)
-- **Frida 16.0+** (automatically managed)
-- **Root access** for Android devices
-- **ADB tools** for Android devices
-
-## 📝 License
-
-Based on the original [Fridump](https://github.com/Nightbringer21/fridump) project  
-Enhanced by RushFridump with intelligent automation and professional interface 🐰
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
-
-<div align="center">
-
-**Made with ❤️ for the security research community**
-
-⭐ Star this repo if RushFridump helped you!
-
-</div>
+MIT. Use for lawful security research and your own devices / apps only.
