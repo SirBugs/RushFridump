@@ -29,6 +29,7 @@ A drop‑in replacement for [`fridump`](https://github.com/Nightbringer21/fridum
 - **Chunked reads** so huge regions don't blow up the Frida RPC.
 - **Single‑file output** (`memory.bin`) plus a machine‑readable **`index.tsv`** mapping every byte range back to its original base address.
 - **Built‑in search** (`--search`) — scan the dump for one or many strings, case‑insensitive, both **ASCII and UTF‑16LE**, with each hit expanded to the full surrounding printable string and tagged with the source memory range.
+- **Port‑forwarding mode** (`-P` / `--random-port`) — start `frida-server` on a custom loopback‑only port and `adb forward` it to the host, bypassing apps that probe the default `27042`.
 - Graceful cleanup: `script.unload()` / `session.detach()` on exit and on Ctrl+C.
 
 ## Installation
@@ -57,6 +58,12 @@ python3 rushfridump.py Calculator
 
 # Dump read-only regions too, extract strings afterwards
 python3 rushfridump.py -U -r -s com.whatsapp
+
+# Dump via a custom port (evades apps that detect default 27042)
+python3 rushfridump.py -U -P 12345 com.whatsapp
+
+# Same idea, but pick a random high port
+python3 rushfridump.py -U --random-port com.whatsapp
 
 # Search a previous dump for credentials (ASCII + UTF-16LE, case-insensitive)
 python3 rushfridump.py --search ./com_whatsapp -i -t password -t "Bearer " -t api_key
@@ -110,6 +117,9 @@ positional:
 dumping:
   -U, --usb                connect over USB (Android)
   -D, --device SERIAL      pick a specific adb device when several are attached
+  -P, --port PORT          start frida-server on this port (loopback-only on
+                           device) and adb-forward it to the host. Requires -U.
+  --random-port            pick a random high port for --port automatically
   -r, --read-only          shortcut for --permissions r--
   --permissions PROT       Frida permission filter (e.g. rw-, r--, r-x)
   --max-range-size BYTES   skip ranges larger than this (default: 20 MiB)
@@ -142,6 +152,27 @@ Frida Version Status:
 
 It then `chmod 755`s the matching binary, kills any running `frida-server`, and starts the correct one via `setsid` so the adb channel detaches cleanly. Pass `--no-auto-server` to skip this entirely.
 
+## Custom port / anti‑detection
+
+Many hardened apps probe `127.0.0.1:27042` from inside their own sandbox to detect Frida. RushFridump can sidestep that:
+
+```bash
+# Start frida-server bound to loopback on port 12345 and adb-forward it
+python3 rushfridump.py -U -P 12345 com.target.app
+
+# Or let the tool roll a random high port (30000–60000)
+python3 rushfridump.py -U --random-port com.target.app
+```
+
+What happens under the hood:
+
+1. `frida-server` is launched on the device with `-l 127.0.0.1:<port>` so it only listens on the device's loopback — nothing on `0.0.0.0`, nothing on `27042`.
+2. `adb forward tcp:<port> tcp:<port>` exposes it to the host.
+3. The host probes `127.0.0.1:<port>` until the server accepts connections, then attaches via `add_remote_device("127.0.0.1:<port>")`.
+4. The forward is removed automatically on exit / Ctrl+C.
+
+`-P` / `--random-port` require `-U` (USB mode).
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -152,6 +183,8 @@ It then `chmod 755`s the matching binary, kills any running `frida-server`, and 
 | `Failed to start frida-server` | Verify root: `adb shell su -c id`. Also check SELinux isn't blocking the binary (`setenforce 0` on permissive test devices) |
 | Huge pages skipped | Raise `--max-range-size`; regions > default 20 MiB are skipped by design |
 | RPC timeouts on large regions | Lower `--chunk-size` (e.g. `--chunk-size 262144`) |
+| `frida-server not reachable on 127.0.0.1:<port>` | Your `frida-server` build may not support the `-l` listen flag — upgrade to a recent release, or drop `-P` and use the default port |
+| `--port requires -U/--usb` | `-P` / `--random-port` only make sense with USB mode; add `-U` |
 
 ## Credits
 
