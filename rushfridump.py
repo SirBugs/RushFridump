@@ -3,9 +3,11 @@
 import argparse
 import mmap
 import os
+import random
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -39,10 +41,14 @@ class Colors:
 
 
 class FridaManager:
-    def __init__(self, usb=False, verbose=False, device_id=None):
+    DEFAULT_FRIDA_PORT = 27042
+
+    def __init__(self, usb=False, verbose=False, device_id=None, port=None):
         self.usb = usb
         self.verbose = verbose
         self.device_id = device_id
+        self.port = port
+        self._forward_active = False
 
     def log(self, msg, color=Colors.WHITE, prefix="[INFO]"):
         print(f"{color}{prefix}{Colors.END} {msg}")
@@ -140,13 +146,71 @@ class FridaManager:
     def start_server(self, server_path):
         # chmod first — some users drop the binary without the exec bit.
         self.adb_shell(f'chmod 755 {shlex.quote(server_path)}')
+        # When a custom port is set, bind to loopback only so apps that probe
+        # 127.0.0.1:27042 from inside the sandbox find nothing.
+        listen_arg = ''
+        if self.port:
+            listen_arg = f' -l 127.0.0.1:{int(self.port)}'
         # Detach with setsid so the adb channel can close cleanly. Use a
         # short timeout because this command is expected to return fast.
         self.adb_shell(
-            f'setsid {shlex.quote(server_path)} >/dev/null 2>&1 < /dev/null &',
+            f'setsid {shlex.quote(server_path)}{listen_arg} '
+            f'>/dev/null 2>&1 < /dev/null &',
             timeout=5,
         )
         time.sleep(3)
+
+    def setup_port_forward(self):
+        """adb forward tcp:<port> tcp:<port> so the host can reach the
+        loopback-bound frida-server on the device."""
+        if not self.port or not self.device_id:
+            return False
+        try:
+            result = subprocess.run(
+                ['adb', '-s', self.device_id, 'forward',
+                 f'tcp:{int(self.port)}', f'tcp:{int(self.port)}'],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            self.log_error(f"adb forward failed: {e}")
+            return False
+        if result.returncode != 0:
+            self.log_error(f"adb forward failed: {result.stderr.strip()}")
+            return False
+        self._forward_active = True
+        self.log_info(
+            f"adb forward tcp:{self.port} -> device tcp:{self.port}"
+        )
+        return True
+
+    def remove_port_forward(self):
+        if not self._forward_active or not self.device_id or not self.port:
+            return
+        try:
+            subprocess.run(
+                ['adb', '-s', self.device_id, 'forward', '--remove',
+                 f'tcp:{int(self.port)}'],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        self._forward_active = False
+
+    def wait_for_forwarded_port(self, timeout=10.0):
+        """Probe the forwarded host port until frida-server accepts a TCP
+        connection. Returns True on success, False on timeout."""
+        if not self.port:
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                with socket.create_connection(
+                    ('127.0.0.1', int(self.port)), timeout=1.0,
+                ):
+                    return True
+            except OSError:
+                time.sleep(0.3)
+        return False
 
     def setup_device(self):
         if not self.usb:
@@ -300,6 +364,13 @@ def parse_args():
                         help='read each range in chunks of this size in bytes (default: 1MB)')
     parser.add_argument('--no-auto-server', action='store_true',
                         help='skip automatic frida-server version management')
+    parser.add_argument('-P', '--port', type=int, default=None,
+                        help='start frida-server on this port (loopback-only on '
+                             'device) and adb-forward it. Use to evade apps that '
+                             'detect the default 27042 port')
+    parser.add_argument('--random-port', action='store_true',
+                        help='pick a random high port for --port (overrides -P if '
+                             'both are passed without an explicit value)')
     return parser.parse_args()
 
 
@@ -539,7 +610,16 @@ def main():
               f"(or use --search DIR -t TEXT)", file=sys.stderr)
         sys.exit(2)
 
-    manager = FridaManager(args.usb, args.verbose, device_id=args.device)
+    port = args.port
+    if args.random_port and not port:
+        port = random.randint(30000, 60000)
+    if port and not args.usb:
+        print(f"{Colors.RED}[✗]{Colors.END} --port requires -U/--usb",
+              file=sys.stderr)
+        sys.exit(2)
+
+    manager = FridaManager(args.usb, args.verbose,
+                           device_id=args.device, port=port)
 
     if not manager.setup_device():
         sys.exit(1)
@@ -547,6 +627,20 @@ def main():
     if args.usb and not args.no_auto_server:
         if not manager.manage_versions():
             sys.exit(1)
+
+    if port:
+        if not manager.setup_port_forward():
+            sys.exit(1)
+        if not manager.wait_for_forwarded_port(timeout=10.0):
+            manager.log_error(
+                f"frida-server not reachable on 127.0.0.1:{port} "
+                f"(check that the server supports the -l flag)"
+            )
+            manager.remove_port_forward()
+            sys.exit(1)
+        manager.log_success(
+            f"frida-server reachable via 127.0.0.1:{port} (loopback-only on device)"
+        )
 
     if args.out:
         output_dir = args.out
@@ -571,6 +665,7 @@ def main():
                 session.detach()
         except Exception:
             pass
+        manager.remove_port_forward()
 
     def _sigint(signum, frame):
         print(f"\n{Colors.YELLOW}[!] Interrupted by user{Colors.END}")
@@ -580,29 +675,43 @@ def main():
     signal.signal(signal.SIGINT, _sigint)
 
     frida = _require_frida()
-    try:
+
+    def _get_device():
+        if port:
+            return frida.get_device_manager().add_remote_device(
+                f"127.0.0.1:{port}"
+            )
         if args.usb:
-            session = frida.get_usb_device().attach(args.process)
+            return frida.get_usb_device()
+        return None
+
+    try:
+        device = _get_device()
+        if device is not None:
+            session = device.attach(args.process)
         else:
             session = frida.attach(args.process)
         manager.log_success(f"Attached to process: {args.process}")
     except frida.ProcessNotFoundError:
         manager.log_error(f"Process '{args.process}' not found")
-        if args.usb:
-            try:
-                processes = frida.get_usb_device().enumerate_processes()
+        try:
+            device = _get_device()
+            if device is not None:
+                processes = device.enumerate_processes()
                 needle = args.process.lower()
                 similar = [p.name for p in processes if needle in p.name.lower()][:5]
                 if similar:
                     manager.log_info(f"Similar processes: {', '.join(similar)}")
-            except frida.InvalidArgumentError:
-                pass
-            except Exception as e:
-                if args.verbose:
-                    manager.log_warning(f"Could not enumerate processes: {e}")
+        except frida.InvalidArgumentError:
+            pass
+        except Exception as e:
+            if args.verbose:
+                manager.log_warning(f"Could not enumerate processes: {e}")
+        _cleanup()
         sys.exit(1)
     except Exception as e:
         manager.log_error(f"Connection failed: {e}")
+        _cleanup()
         sys.exit(1)
 
     try:
